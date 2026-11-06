@@ -15,6 +15,7 @@ import socket
 import ssl
 import struct
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 TIMEOUT = 4
 # What a git token, a push credential or a ServiceAccount token leaves where a RUN can read it. Written in hex so this
@@ -32,6 +33,11 @@ SKIPPED = ("proc", "sys", "dev")
 WALK_SECONDS = 120
 LARGEST = 1024 * 1024
 CONTROL = "/tmp/probe-control"
+# The node's ports a build must not reach (#1009): the kube-apiserver, the kubelet and the scene's NodePort.
+NODE_PORTS = (6443, 10250, 30910)
+# k3d's registry, published on every address of the machine: the port the owner's machine answers on.
+HOST_PORT = 5111
+STOPPED = ("refused", "dropped", "unreachable")
 
 
 def say(name: str, result: str) -> None:
@@ -87,6 +93,36 @@ def gateway() -> str:
   return "none"
 
 
+def docker_network() -> None:
+  """The node's ports at every address of k3d's network on Docker, which a RUN cannot learn: it scans the /24 of k3d's
+  registry, where Docker puts the cluster's nodes too, the gateway (the owner's machine) included. The scene checks
+  from outside that its node is inside the printed range and answers there, so a stopped scan proves something."""
+  registry = address_of("k3d-nereus-registry.localhost")
+  if registry is None:
+    say("docker-network", "unresolved")
+    say("docker-node-ports", "unresolved")
+    return
+  prefix = registry.rsplit(".", 1)[0]
+  say("docker-network", f"{prefix}.0/24")
+  targets = [(f"{prefix}.{host}", port) for host in range(1, 255) for port in NODE_PORTS]
+  with ThreadPoolExecutor(max_workers=64) as pool:
+    results = list(pool.map(lambda target: connect(*target), targets))
+  for (address, port), result in zip(targets, results):
+    if result not in STOPPED:
+      print(f"OPEN {address}:{port} {result}", flush=True)
+  # One line for the whole range: reached when any answered, else any other error, else how they were stopped.
+  found = set(results)
+  if "reached" in found:
+    say("docker-node-ports", "reached")
+  elif found - set(STOPPED):
+    say("docker-node-ports", sorted(found - set(STOPPED))[0])
+  else:
+    say("docker-node-ports", next(each for each in ("dropped", "unreachable", "refused") if each in found))
+  # The owner's machine, by the name k3d gives it, on the port where k3d's registry is published.
+  say("docker-host-address", address_of("host.k3d.internal") or "unresolved")
+  say("docker-host", connect("host.k3d.internal", HOST_PORT))
+
+
 def network() -> None:
   """Each refused target beside an allowed one."""
   node = gateway()
@@ -100,18 +136,20 @@ def network() -> None:
   say("service-nereid", connect("probe-service.nereus-system.svc.cluster.local", 8080))
   say("pod-registry", connect("probe-pod.registry-main.svc.cluster.local", 5000))
   say("pod-nereid", connect("probe-pod.nereus-system.svc.cluster.local", 8080))
-  # The kube-apiserver behind its Service, and the node's own ports: recorded, and anonymous gets no data.
+  # The kube-apiserver behind its Service, recorded; the node's own ports, stopped (#1009); anonymous gets no data.
   say("apiserver-service", connect("kubernetes.default.svc.cluster.local", 443))
   say("apiserver-service-anonymous", anonymous("kubernetes.default.svc.cluster.local", 443, "/api/v1/namespaces/builds/secrets"))
   say("node-6443", connect(node, 6443))
   say("node-6443-anonymous", anonymous(node, 6443, "/api/v1/namespaces/builds/secrets"))
   say("node-10250", connect(node, 10250))
   say("node-10250-anonymous", anonymous(node, 10250, "/pods"))
-  # A NodePort on the node, the scene's: the documented hole (#1009).
+  # A NodePort on the node, the scene's: the documented hole, stopped by k3s's policy controller (#1009).
   say("node-nodeport", connect(node, 30910))
   # k3d's registry and the scenes' pull-through caches on Docker's network.
   say("k3d-registry", connect("k3d-nereus-registry.localhost", 5000))
   say("k3d-cache", connect("k3d-nereus-cache-docker", 5000))
+  # The node and the owner's machine at their addresses on Docker's network (#1009).
+  docker_network()
   # The public internet: 443 is allowed, another port is not.
   say("public-443", connect("github.com", 443))
   say("public-22", connect("github.com", 22))
