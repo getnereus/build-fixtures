@@ -150,6 +150,9 @@ def network() -> None:
   say("k3d-cache", connect("k3d-nereus-cache-docker", 5000))
   # The node and the owner's machine at their addresses on Docker's network (#1009).
   docker_network()
+  # The cloud's metadata endpoint, which hands out the node's credentials (getnereus/nereus#1121): stopped. The scene
+  # gives it a listener on the build node, so a policy that let it through would print reached.
+  say("metadata-80", connect("169.254.169.254", 80))
   # The public internet: 443 is allowed, another port is not.
   say("public-443", connect("github.com", 443))
   say("public-22", connect("github.com", 22))
@@ -169,6 +172,8 @@ def read(path: str, limit: int = LARGEST) -> bytes | None:
 
 def processes() -> None:
   """Every process a RUN sees, their environment, command lines and mounts, and every file under their roots."""
+  # The kernel a RUN runs on (getnereus/nereus#1120): in sandbox mode gVisor's, never the node's.
+  say("kernel", os.uname().release)
   pids = [each for each in os.listdir("/proc") if each.isdigit()]
   say("proc-visible", str(len(pids)))
   found_proc, found_mounts, roots = [], [], {}
